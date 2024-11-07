@@ -1,0 +1,223 @@
+var LogString, FC, DEBUG, SOC, L, Lw, Time, aktPreis, Preis_cheap_av, Preis_high, Hub, Status, Zeit;
+
+// jede Stunde neustarten
+
+schedule("0 * * * *", async function () {
+    await fetchCurrentPrice();
+    await Load();
+});
+
+// aWATTar Strompreis abfragen
+const fetch = require('node-fetch');
+
+let currentDayTimestamp = 0;
+let currentHourTimestamp = 0;
+let currentPrice = 0;
+let currentHour = 0;
+let cheapestHours = 0;
+let mostExpensiveHours = 0;
+let cheapestPriceAverage = 0;
+let cheapestHighPrice = 0;
+let expensivePriceAverage = 0;
+let highestcheapPrice = 0;
+
+
+async function fetchCurrentPrice() {
+    try {
+        // API-Abfrage für den aktuellen Tag
+        const day = new Date();
+        currentDayTimestamp = day.setMinutes(0, 0, 0); // Setze die Minuten, Sekunden und Millisekunden auf 0
+        currentDayTimestamp -= day % (24 * 60 * 60 * 1000); // Millisekunden seit Mitternacht
+
+        const apiUrl = `https://api.awattar.at/v1/marketdata?start=${currentDayTimestamp}`;
+
+        // Aktuelle Stunde
+        const now = new Date();
+        currentHourTimestamp = now.setMinutes(0, 0, 0); // Setze die Minuten, Sekunden und Millisekunden auf 0
+
+        // Zerlegen
+        const response = await fetch(apiUrl);
+        const data = await response.json();
+
+        if (data.data && data.data.length > 0) {
+            // Filtern Sie die Daten nach Datum (nur Stunden des aktuellen Tages)
+            const currentDayData = data.data.filter(hour => {
+                const hourTimestamp = new Date(hour.start_timestamp);
+                return hourTimestamp.getDate() === now.getDate();
+            });
+
+            if (currentDayData.length > 0) {
+                const currentHourData = currentDayData.find(hour => hour.start_timestamp === currentHourTimestamp);
+                const hourData = currentDayData;
+
+                // Sortieren Stunden nach Preis (niedrigster zu höchster)
+                hourData.sort((a, b) => a.marketprice - b.marketprice);
+
+                // Nimm die günstigsten drei und teuersten drei Stunden
+                cheapestHours = hourData.slice(0 , 3);
+                mostExpensiveHours = hourData.slice(-5);
+
+                // Mittelwert für die günstigsten Stunden
+                cheapestPriceAverage = cheapestHours.reduce((total, hour) => total + hour.marketprice, 0) / 3;
+                expensivePriceAverage = mostExpensiveHours.reduce((total, hour) => total + hour.marketprice, 0) / 5;
+
+                // Sortiere die teuersten Stunden nach Preis (höchster zu niedrigster)
+                mostExpensiveHours.sort((a, b) => b.marketprice - a.marketprice);
+
+                // Preis der billigsten der teuersten Stunden
+                cheapestHighPrice = mostExpensiveHours[2].marketprice;
+
+                // Preis der teuersten der billigsten Stunden
+                highestcheapPrice = cheapestHours[2].marketprice;
+                
+                currentPrice = currentHourData.marketprice;
+                currentHour = new Date(currentHourTimestamp).getHours(); // 1 Stunde dazu, eigentlich nur wichtig für die Ausgabe
+
+                // Ausgabe der Informationen
+                console.log("Günstigste Stunden:");
+                cheapestHours.forEach(hour => {
+                    console.log(`Stunde: ${new Date(hour.start_timestamp).getHours()}, Preis: ${(hour.marketprice / 10 * 1.2).toFixed(3)} cent/kWh`);
+
+                });
+                console.log("Teuerste Stunden:");
+                mostExpensiveHours.forEach(hour => {
+                    console.log(`Stunde: ${new Date(hour.start_timestamp).getHours()}, Preis: ${(hour.marketprice / 10 * 1.2).toFixed(3)} cent/kWh`);
+                });
+                console.log(`Mittelwert der günstigsten Stunden: ${(cheapestPriceAverage / 10 * 1.2).toFixed(3)} cent/kWh`);
+                console.log(`Mittelwert der teuersten Stunden: ${(expensivePriceAverage / 10 * 1.2).toFixed(3)} cent/kWh`);
+                console.log(`Billigster Preis der teuersten Stunden: ${(cheapestHighPrice / 10 * 1.2).toFixed(3)} cent/kWh`);
+                console.log(`Teuerester Preis der günstigsten Stunden: ${(highestcheapPrice / 10 * 1.2).toFixed(3)} cent/kWh`);
+                console.log(`Preis der aktuellen vollen Stunde (Stunde ${currentHour}): ${(currentPrice / 10 * 1.2).toFixed(3)} cent/kWh`);
+            }            
+        } else {
+            console.log("Preisdaten für die aktuelle volle Stunde nicht gefunden.");
+        }
+    } catch (error) {
+        console.error("Fehler beim Abrufen der Daten: " + error);
+    }
+}
+
+
+// Funktion zum Laden aufrufen - todo Forecast einbauen, relevant in den Sommermonaten
+async function Load() {
+
+    await fetchCurrentPrice(); // Auf fetchCurrentPrice warten
+
+    // get ForeCast for today
+    //FC = getState("0_userdata.0.SolarGraph.EnergieMaxHeute").val;
+    
+    // current SOC
+    SOC = getState("modbus.0.holdingRegisters.1.40351_ChaState").val;
+    
+    // current Price
+    aktPreis = (currentPrice / 10 * 1.2).toFixed(3);
+    Preis_cheap_av = (cheapestPriceAverage / 10 *1.2).toFixed(3);
+    Preis_high = (cheapestHighPrice / 10 *1.2).toFixed(3);
+
+    // currentHour
+    Zeit = currentHour;
+    
+    
+    // Überprüfen, ob überhaupt geladen wird - Delta sollte größer 5 Cent sein
+    const expensivePrice = Number((mostExpensiveHours[0].marketprice / 10 * 1.2).toFixed(3));
+    const cheapestPrice = Number((cheapestHours[0].marketprice / 10 * 1.2).toFixed(3));
+    const priceDelta = expensivePrice - cheapestPrice;
+    
+    // Definiere Schwellwert (hier 7 Cent)
+    const threshold = 7;
+
+    if (priceDelta >= threshold) {
+        
+        // Laden aus dem Netz - wenn Preis unter bestimmten Wert liegt UND der Speicher nicht auf 100% steht
+        
+        if (/*aktPreis <= */highestcheapPrice && cheapestHours.some(hour => hour.start_timestamp === currentHourTimestamp) && SOC < 100) {
+        
+            // 100% * ScaleFactor (100)
+            L = -5000;
+            Lw = -50; //= 50%
+            Status = 1;
+
+            //storctl_mod = 0 = normal operation
+            //storctl_mod = 1 = discharge
+            //storctl_mod = 2 = charge
+            //storctl_mod = 3 = no charge/discharge (battery not in use)
+
+            //storctl_mod = 2 = charge
+            setState("modbus.0.holdingRegisters.1.40348_StorCtl_Mod"/*bit Storage Control Mode*/, 2);
+            // Timeout 1 Stunde + 5 Min
+            setState("modbus.0.holdingRegisters.1.40358_InOutWRte_RvrtTms"/*Timeout periode for charge-discharge rate*/, 3900);
+            
+            setState("modbus.0.holdingRegisters.1.40355_OutWRte", L);
+            setState("0_userdata.0.Ladeleistung-Modbus", Lw);
+            setState("0_userdata.0.LadeStatus", Status);
+            console.log([ ' Laden aus dem Netz | SOC = ',SOC, '% |Preis 3h günstig durchschnitt= ',Preis_cheap_av,' cent/kWh | Preis aktuell = ',aktPreis,' cent/kWh'].join(''));
+        
+        }
+
+        // Speicher sperren wenn Preis unter einem bestimmten Wert liegt = nicht ausleeren wenn Strom günstig ist UND Speicher größer 5% ist
+        
+        else if (/*aktPreis < Preis_high &&*/ !mostExpensiveHours.some(hour => hour.start_timestamp === currentHourTimestamp) && SOC > 5) {
+
+            // 100% * ScaleFactor (100)
+            L = 0;
+            Lw = 0; //=0%
+            Status = 2;
+                
+            //storctl_mod = 2 = charge
+            setState("modbus.0.holdingRegisters.1.40348_StorCtl_Mod"/*bit Storage Control Mode*/, 2);
+            // Timeout 1 Stunde + 5 Min
+            setState("modbus.0.holdingRegisters.1.40358_InOutWRte_RvrtTms"/*Timeout periode for charge-discharge rate*/, 3900);
+                
+            setState("modbus.0.holdingRegisters.1.40355_OutWRte", L);
+            setState("0_userdata.0.Ladeleistung-Modbus", Lw);
+            setState("0_userdata.0.LadeStatus", Status);
+            console.log([ ' Speicher Entladen gesperrt | SOC = ',SOC, '% |Preis hoch = ',Preis_high,' cent/kWh | Preis aktuell = ',aktPreis,' cent/kWh'].join(''));
+
+        }
+
+        else {
+            L = 10000;
+            Lw = 100;
+            Status = 3;
+            
+            //storctl_mod = 0 = normal operation
+            setState("modbus.0.holdingRegisters.1.40348_StorCtl_Mod"/*bit Storage Control Mode*/, 0);
+            // Timeout auf 0
+            setState("modbus.0.holdingRegisters.1.40358_InOutWRte_RvrtTms"/*Timeout periode for charge-discharge rate*/, 0);
+        
+            setState("modbus.0.holdingRegisters.1.40355_OutWRte", L);
+            setState("0_userdata.0.Ladeleistung-Modbus", Lw); 
+            setState("0_userdata.0.LadeStatus", Status);   
+            console.log([ 'Normalbetrieb | SOC = ',SOC, '% | aktueller Preis = ',aktPreis, ' cent/kWh'].join(''));
+        }
+    console.log([ 'Delta größer 7 cent - Ladesteuerung erlaubt | Preisdelta = ',(priceDelta).toFixed(3), 'cent | SOC = ',SOC, '% | aktueller Preis = ',aktPreis, ' cent/kWh'].join(''));    
+    }
+    else {
+        L = 10000;
+        Lw = 100;
+        Status = 4;
+        
+        //storctl_mod = 0 = normal operation
+        setState("modbus.0.holdingRegisters.1.40348_StorCtl_Mod"/*bit Storage Control Mode*/, 0);
+        // Timeout auf 0
+        setState("modbus.0.holdingRegisters.1.40358_InOutWRte_RvrtTms"/*Timeout periode for charge-discharge rate*/, 0);
+
+        setState("modbus.0.holdingRegisters.1.40355_OutWRte", L);
+        setState("0_userdata.0.Ladeleistung-Modbus", Lw);    
+        setState("0_userdata.0.LadeStatus", Status); 
+        console.log([ 'Delta kleiner 5 cent - Ladesteuerung nicht erlaubt/Normalbetrieb | Preisdelta = ',(priceDelta).toFixed(3), 'cent | SOC = ',SOC, '% | Preis = ',aktPreis, ' cent/kWh'].join(''));
+    }
+}
+
+
+////DEBUG////
+
+// Log schreiben, wenn DEBUG == true
+function LOG(LogString) {
+    if (DEBUG) {
+    console.log(LogString);
+    }
+}
+
+DEBUG = true;
+await Load();
